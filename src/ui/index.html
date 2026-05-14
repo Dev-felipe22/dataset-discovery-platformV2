@@ -177,6 +177,7 @@
       <input id="query" type="text" placeholder="Search datasets…" value="text classification" />
       <button id="search-btn">Search</button>
       <button id="refresh-admin" style="background:#1d4ed8;color:#e2e8f0;">Metrics</button>
+      <button id="list-datasets-btn" style="background:#7c3aed;color:#e2e8f0;">List Datasets</button>
     </div>
     <div class="filters">
       <select id="filter-license"><option value="">License</option></select>
@@ -187,6 +188,7 @@
       <button id="reset-filters" style="background:#334155;color:#e2e8f0;">Reset</button>
     </div>
     <div id="status" class="desc" style="margin-bottom:8px;"></div>
+    <div id="datasets-list" class="panel" style="display:none;"></div>
     <div id="admin" class="panel"></div>
     <div id="ops" class="panel"></div>
     <div id="legend" class="panel">
@@ -249,6 +251,29 @@
       }
     });
     document.getElementById("refresh-admin").addEventListener("click", () => loadAdmin());
+
+    const datasetsListEl = document.getElementById("datasets-list");
+    document.getElementById("list-datasets-btn").addEventListener("click", async () => {
+      datasetsListEl.style.display = "block";
+      datasetsListEl.innerHTML = "Loading datasets…";
+      try {
+        const resp = await fetch("https://4b195afc-abeb-4bb4-9890-ae4d0a343c2d.mock.pstmn.io/datasets/list");
+        const data = await resp.json();
+        const rows = (data.data || []).map(d =>
+          `<div style="padding:4px 0;border-bottom:1px solid #1e293b;">
+            <strong>${d.name}</strong>
+            <span style="color:#94a3b8;font-size:13px;margin-left:8px;">${d.domain}</span>
+            <span style="color:#475569;font-size:12px;margin-left:8px;">id: ${d.id}</span>
+          </div>`
+        ).join("");
+        datasetsListEl.innerHTML = `
+          <div><strong>Datasets</strong> — ${data.total_items} total (page ${data.page}/${data.total_pages})</div>
+          <div style="margin-top:6px;">${rows}</div>
+        `;
+      } catch (err) {
+        datasetsListEl.innerHTML = `<span style="color:#ef4444;">Failed to load datasets:</span> ${err}`;
+      }
+    });
     document.getElementById("apply-filters").addEventListener("click", () => {
       applyFiltersFromUI();
       state.offset = 0;
