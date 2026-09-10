@@ -3,6 +3,7 @@ from functools import lru_cache
 from fastapi import Depends
 
 from src.config import Settings, load_settings
+from src.connectors.es_rows_client import EsRowsClient
 from src.storage import DuckDBStorage, PostgresStorage, StorageAdapter
 
 
@@ -28,4 +29,10 @@ def get_storage(settings: Settings = Depends(get_settings)) -> StorageAdapter:
     # init is idempotent and cheap; safe to call at request start.
     storage.init()
     return storage
+
+
+def get_es_rows_client(settings: Settings = Depends(get_settings)) -> EsRowsClient:
+    # Not lru_cache'd: Settings is a mutable dataclass (unhashable), and
+    # constructing the ES client is cheap — no network I/O happens here.
+    return EsRowsClient(settings.es_url, settings.es_rows_index)
 

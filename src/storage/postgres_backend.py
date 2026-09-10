@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .base import StorageAdapter
@@ -98,4 +99,35 @@ class PostgresStorage(StorageAdapter):
         raise NotImplementedError
 
     def prefetch_candidates(self, limit: int):
+        raise NotImplementedError
+
+    def eval_list_queries(self, *, active_only: bool = True) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def eval_upsert_query(self, query: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def eval_set_query_active(self, query_id: str, active: bool) -> None:
+        raise NotImplementedError
+
+    def eval_create_run(
+        self, run_id: str, *, label: str, engine: str, k: int, created_at: datetime
+    ) -> None:
+        raise NotImplementedError
+
+    def eval_add_run_results(self, run_id: str, query_id: str, rows: List[Dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+    def eval_list_runs(self) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def eval_get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def eval_get_run_results(self, run_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        raise NotImplementedError
+
+    def eval_upsert_judgment(
+        self, query_id: str, dataset_id: str, relevant: bool, judged_by: Optional[str] = None
+    ) -> None:
         raise NotImplementedError

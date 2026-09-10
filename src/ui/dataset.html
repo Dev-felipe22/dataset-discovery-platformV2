@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dataset Detail</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --accent: #22d3ee;
+      --rows-accent: #4fb8a3;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --font: "Space Grotesk", "Inter", system-ui, -apple-system, sans-serif;
+    }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background: radial-gradient(circle at 20% 20%, #1f2937, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+      padding: 32px;
+    }
+    .app-shell { max-width: 900px; margin: 0 auto; }
+    a.back {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      display: inline-block;
+      margin-bottom: 20px;
+    }
+    a.back:hover { color: var(--text); }
+    h1 {
+      margin: 0 0 6px 0;
+      letter-spacing: -0.02em;
+      font-size: 28px;
+      word-break: break-word;
+    }
+    .dataset-id {
+      font-family: monospace;
+      color: var(--muted);
+      font-size: 14px;
+      margin-bottom: 18px;
+    }
+    .panel {
+      background: var(--card);
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+    .panel h2 {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin: 0 0 12px;
+    }
+    .facts { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 14px; }
+    .facts span strong { color: var(--muted); font-weight: 600; margin-right: 6px; }
+    .desc { color: var(--text); font-size: 14.5px; line-height: 1.5; }
+    .row-card {
+      background: #0c1425;
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .row-meta {
+      font-family: monospace;
+      font-size: 12px;
+      color: var(--rows-accent);
+      margin-bottom: 6px;
+    }
+    .row-meta span { color: var(--muted); margin-right: 10px; }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+      color: var(--text);
+      font-family: monospace;
+    }
+    .status { color: var(--muted); font-size: 14px; }
+    .error { color: #ef4444; }
+    .badge-none {
+      display: inline-block;
+      background: #1e293b;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <a class="back" href="index.html">← Back to search</a>
+    <div id="header">
+      <h1 id="title">Loading…</h1>
+      <div class="dataset-id" id="dataset-id"></div>
+    </div>
+
+    <div class="panel" id="metadata-panel">
+      <h2>Metadata (DuckDB)</h2>
+      <div id="metadata-body" class="status">Loading metadata…</div>
+    </div>
+
+    <div class="panel" id="rows-panel">
+      <h2>Sample rows (Elasticsearch)</h2>
+      <div id="rows-body" class="status">Loading sample rows…</div>
+    </div>
+  </div>
+
+  <script>
+    const apiBase = (window.API_BASE || "http://127.0.0.1:8000") + "/v2";
+    const params = new URLSearchParams(window.location.search);
+    const datasetId = params.get("id") || "";
+
+    document.getElementById("title").textContent = datasetId || "No dataset specified";
+    document.getElementById("dataset-id").textContent = datasetId;
+
+    async function loadMetadata() {
+      const el = document.getElementById("metadata-body");
+      if (!datasetId) { el.innerHTML = "<span class='error'>No ?id= given in the URL.</span>"; return; }
+      try {
+        const resp = await fetch(`${apiBase}/dataset?id=${encodeURIComponent(datasetId)}`);
+        if (resp.status === 404) {
+          el.innerHTML = "<span class='error'>Not found in the DuckDB catalog.</span>";
+          return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const d = await resp.json();
+        document.getElementById("title").textContent = d.title || d.id;
+        const facts = [];
+        if (d.license_class) facts.push(`<span><strong>License</strong>${d.license_class}</span>`);
+        if (d.access_class) facts.push(`<span><strong>Access</strong>${d.access_class}</span>`);
+        if (d.size_class) facts.push(`<span><strong>Size</strong>${d.size_class}</span>`);
+        if (d.modalities && d.modalities.length) facts.push(`<span><strong>Modalities</strong>${d.modalities.join(", ")}</span>`);
+        if (d.languages && d.languages.length) facts.push(`<span><strong>Languages</strong>${d.languages.join(", ")}</span>`);
+        el.innerHTML = `
+          <div class="facts">${facts.join("")}</div>
+          ${d.description ? `<div class="desc" style="margin-top:10px;">${d.description}</div>` : ""}
+        `;
+      } catch (err) {
+        el.innerHTML = `<span class="error">Failed to load metadata: ${err}</span>`;
+      }
+    }
+
+    async function loadRows() {
+      const el = document.getElementById("rows-body");
+      if (!datasetId) { el.innerHTML = ""; return; }
+      try {
+        const resp = await fetch(`${apiBase}/sample_rows?dataset_id=${encodeURIComponent(datasetId)}&limit=50`);
+        if (resp.status === 404) {
+          el.innerHTML = "<span class='badge-none'>No sample rows indexed for this dataset.</span>";
+          return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const rows = data.rows || [];
+        el.innerHTML = `
+          <div class="status" style="margin-bottom:10px;">${data.total} row(s) shown</div>
+          ${rows.map(r => `
+            <div class="row-card">
+              <div class="row-meta">
+                <span>config=${r.config || "default"}</span><span>split=${r.split}</span><span>row=${r.row_index}</span>
+              </div>
+              <pre>${JSON.stringify(r.row, null, 2)}</pre>
+            </div>
+          `).join("")}
+        `;
+      } catch (err) {
+        el.innerHTML = `<span class="error">Failed to load sample rows: ${err}</span>`;
+      }
+    }
+
+    loadMetadata();
+    loadRows();
+  </script>
+</body>
+</html>

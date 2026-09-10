@@ -1,0 +1,41 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - duckdb_data:/data
+      - pipeline_data:/pipeline_data:ro
+      - v1_pipeline_data:/v1_pipeline_data:ro
+    environment:
+      DUCKDB_PATH: /data/demo_discovery.duckdb
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      ES_URL: http://host.docker.internal:9200
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  ui:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src/ui:/usr/share/nginx/html:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  duckdb_data:
+  pipeline_data:
+    external: true
+  v1_pipeline_data:
+    external: true

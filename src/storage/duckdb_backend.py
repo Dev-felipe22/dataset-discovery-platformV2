@@ -188,7 +188,84 @@ class DuckDBStorage(StorageAdapter):
             )
             """
         )
+        self._init_eval_tables()
         self._ensure_fts_loaded()
+
+    def _init_eval_tables(self) -> None:
+        """Search-quality benchmark harness tables: a reusable query set,
+        persistent relevance judgments (survive across runs, keyed by
+        query+dataset so re-judging isn't needed every run), and the
+        run/result history used to trend metrics over time."""
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval_queries(
+                id TEXT PRIMARY KEY,
+                label TEXT,
+                query TEXT,
+                target_id TEXT,
+                total_relevant INT DEFAULT 1,
+                active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval_relevance_judgments(
+                query_id TEXT,
+                dataset_id TEXT,
+                relevant BOOLEAN,
+                judged_by TEXT,
+                judged_at TIMESTAMP,
+                PRIMARY KEY(query_id, dataset_id)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval_runs(
+                id TEXT PRIMARY KEY,
+                label TEXT,
+                engine TEXT,
+                k INT,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval_run_results(
+                run_id TEXT,
+                query_id TEXT,
+                result_rank INT,
+                dataset_id TEXT,
+                title TEXT,
+                extra TEXT,
+                PRIMARY KEY(run_id, query_id, result_rank)
+            )
+            """
+        )
+        seeded = self.conn.execute("SELECT COUNT(*) FROM eval_queries").fetchone()[0]
+        if seeded == 0:
+            now = datetime.utcnow()
+            # Seeds the benchmark set that this app's search-eval harness was
+            # ported from (hf-queries.py) so it's usable immediately.
+            seed = [
+                ("Q1", "direct entity match", "teleportation health survey",
+                 "NeuralNebula/teleportation-health-survey", 1),
+                ("Q2", "structural, fiction removed", "symptom survey frequency",
+                 "NeuralNebula/teleportation-health-survey", 1),
+                ("Q3", "column level", "nausea dizziness questionnaire respondents",
+                 "NeuralNebula/teleportation-health-survey", 1),
+            ]
+            for qid, label, qtext, target, total_rel in seed:
+                self.conn.execute(
+                    """
+                    INSERT INTO eval_queries (id, label, query, target_id, total_relevant, active, created_at)
+                    VALUES (?, ?, ?, ?, ?, TRUE, ?)
+                    """,
+                    [qid, label, qtext, target, total_rel, now],
+                )
 
     # Datasets
     def upsert_dataset(self, dataset: Dataset) -> None:
@@ -912,3 +989,132 @@ class DuckDBStorage(StorageAdapter):
             [limit],
         ).fetchall()
         return [r[0] for r in rows]
+
+    # Search-quality evaluation ------------------------------------------------
+
+    def eval_list_queries(self, *, active_only: bool = True) -> List[Dict[str, Any]]:
+        sql = "SELECT id, label, query, target_id, total_relevant, active, created_at FROM eval_queries"
+        if active_only:
+            sql += " WHERE active = TRUE"
+        sql += " ORDER BY id"
+        rows = self.conn.execute(sql).fetchall()
+        return [
+            {
+                "id": r[0],
+                "label": r[1],
+                "query": r[2],
+                "target_id": r[3],
+                "total_relevant": r[4],
+                "active": bool(r[5]),
+                "created_at": r[6],
+            }
+            for r in rows
+        ]
+
+    def eval_upsert_query(self, query: Dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO eval_queries (id, label, query, target_id, total_relevant, active, created_at)
+            VALUES (?, ?, ?, ?, ?, TRUE, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label=excluded.label,
+                query=excluded.query,
+                target_id=excluded.target_id,
+                total_relevant=excluded.total_relevant,
+                active=TRUE
+            """,
+            [
+                query["id"],
+                query.get("label", ""),
+                query["query"],
+                query.get("target_id"),
+                query.get("total_relevant", 1),
+                datetime.utcnow(),
+            ],
+        )
+
+    def eval_set_query_active(self, query_id: str, active: bool) -> None:
+        self.conn.execute("UPDATE eval_queries SET active = ? WHERE id = ?", [active, query_id])
+
+    def eval_create_run(
+        self, run_id: str, *, label: str, engine: str, k: int, created_at: datetime
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO eval_runs (id, label, engine, k, created_at) VALUES (?, ?, ?, ?, ?)",
+            [run_id, label, engine, k, created_at],
+        )
+
+    def eval_add_run_results(self, run_id: str, query_id: str, rows: List[Dict[str, Any]]) -> None:
+        for row in rows:
+            self.conn.execute(
+                """
+                INSERT INTO eval_run_results (run_id, query_id, result_rank, dataset_id, title, extra)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, query_id, result_rank) DO UPDATE SET
+                    dataset_id=excluded.dataset_id,
+                    title=excluded.title,
+                    extra=excluded.extra
+                """,
+                [
+                    run_id,
+                    query_id,
+                    row["rank"],
+                    row["dataset_id"],
+                    row.get("title"),
+                    self._json_dump(row.get("extra")),
+                ],
+            )
+
+    def eval_list_runs(self) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT id, label, engine, k, created_at FROM eval_runs ORDER BY created_at DESC"
+        ).fetchall()
+        return [{"id": r[0], "label": r[1], "engine": r[2], "k": r[3], "created_at": r[4]} for r in rows]
+
+    def eval_get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            "SELECT id, label, engine, k, created_at FROM eval_runs WHERE id = ?", [run_id]
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "label": row[1], "engine": row[2], "k": row[3], "created_at": row[4]}
+
+    def eval_get_run_results(self, run_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        rows = self.conn.execute(
+            """
+            SELECT rr.query_id, rr.result_rank, rr.dataset_id, rr.title, rr.extra, j.relevant
+            FROM eval_run_results rr
+            LEFT JOIN eval_relevance_judgments j
+              ON j.query_id = rr.query_id AND j.dataset_id = rr.dataset_id
+            WHERE rr.run_id = ?
+            ORDER BY rr.query_id, rr.result_rank
+            """,
+            [run_id],
+        ).fetchall()
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for query_id, rank, dataset_id, title, extra, relevant in rows:
+            grouped.setdefault(query_id, []).append(
+                {
+                    "rank": rank,
+                    "dataset_id": dataset_id,
+                    "title": title,
+                    "extra": self._json_load(extra) or {},
+                    "relevant": bool(relevant) if relevant is not None else None,
+                }
+            )
+        return grouped
+
+    def eval_upsert_judgment(
+        self, query_id: str, dataset_id: str, relevant: bool, judged_by: Optional[str] = None
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO eval_relevance_judgments (query_id, dataset_id, relevant, judged_by, judged_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(query_id, dataset_id) DO UPDATE SET
+                relevant=excluded.relevant,
+                judged_by=excluded.judged_by,
+                judged_at=excluded.judged_at
+            """,
+            [query_id, dataset_id, relevant, judged_by, datetime.utcnow()],
+        )

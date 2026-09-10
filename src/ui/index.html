@@ -165,6 +165,51 @@
       background: #334155;
       color: #e2e8f0;
     }
+    .eval-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-top: 6px;
+    }
+    .eval-table th, .eval-table td {
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 1px solid #1e293b;
+      vertical-align: middle;
+    }
+    .eval-table th {
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+    }
+    .eval-table tr.run-row {
+      cursor: pointer;
+    }
+    .eval-table tr.run-row:hover {
+      background: #0f1b30;
+    }
+    .eval-table tr.run-row.selected {
+      background: #10233f;
+    }
+    .pill-btn {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .pill-yes { background: #10b981; color: #052e1f; }
+    .pill-no { background: #ef4444; color: #2c0b0b; }
+    .pill-unset { background: #334155; color: #e2e8f0; }
+    .eval-form input, .eval-form select {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #1e293b;
+      background: #020617;
+      color: var(--text);
+      font-size: 13px;
+    }
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -177,7 +222,8 @@
       <input id="query" type="text" placeholder="Search datasets…" value="text classification" />
       <button id="search-btn">Search</button>
       <button id="refresh-admin" style="background:#1d4ed8;color:#e2e8f0;">Metrics</button>
-      <button id="list-datasets-btn" style="background:#7c3aed;color:#e2e8f0;">List Datasets</button>
+      <button id="list-datasets-btn" style="background:#7c3aed;color:#e2e8f0;">Sample Rows</button>
+      <button id="toggle-eval" style="background:#059669;color:#e2e8f0;">Search Metrics</button>
     </div>
     <div class="filters">
       <select id="filter-license"><option value="">License</option></select>
@@ -191,6 +237,7 @@
     <div id="datasets-list" class="panel" style="display:none;"></div>
     <div id="admin" class="panel"></div>
     <div id="ops" class="panel"></div>
+    <div id="eval-panel" class="panel" style="display:none;"></div>
     <div id="legend" class="panel">
       <strong>Legend:</strong>
       <div class="legend-row">
@@ -252,24 +299,67 @@
     });
     document.getElementById("refresh-admin").addEventListener("click", () => loadAdmin());
 
+    const evalPanelEl = document.getElementById("eval-panel");
+    let evalPanelLoaded = false;
+    document.getElementById("toggle-eval").addEventListener("click", () => {
+      const showing = evalPanelEl.style.display !== "none";
+      evalPanelEl.style.display = showing ? "none" : "block";
+      if (!showing && !evalPanelLoaded) {
+        evalPanelLoaded = true;
+        renderEvalPanel();
+      }
+    });
+
     const datasetsListEl = document.getElementById("datasets-list");
     document.getElementById("list-datasets-btn").addEventListener("click", async () => {
       datasetsListEl.style.display = "block";
-      datasetsListEl.innerHTML = "Loading datasets…";
+      datasetsListEl.innerHTML = "Loading datasets with sample rows…";
       try {
-        const resp = await fetch("https://4b195afc-abeb-4bb4-9890-ae4d0a343c2d.mock.pstmn.io/datasets/list");
+        const resp = await fetch(`${apiBase}/sample_datasets?limit=50`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        const rows = (data.data || []).map(d =>
-          `<div style="padding:4px 0;border-bottom:1px solid #1e293b;">
-            <strong>${d.name}</strong>
-            <span style="color:#94a3b8;font-size:13px;margin-left:8px;">${d.domain}</span>
-            <span style="color:#475569;font-size:12px;margin-left:8px;">id: ${d.id}</span>
-          </div>`
-        ).join("");
+        const items = data.items || [];
+        if (items.length === 0) {
+          datasetsListEl.innerHTML = "<div>No datasets with sample rows yet — run the V1 sampler and scripts/import_samples_to_es.py first.</div>";
+          return;
+        }
+        const rowsHtml = items.map((d, i) => `
+          <div class="sample-dataset-row" style="padding:6px 0;border-bottom:1px solid #1e293b;cursor:pointer;">
+            <strong>${d.dataset_id}</strong>
+            <span style="color:#94a3b8;font-size:13px;margin-left:8px;">${d.row_count.toLocaleString()} rows</span>
+            <span style="color:#475569;font-size:12px;margin-left:8px;">(click to view rows)</span>
+          </div>
+          <div class="sample-dataset-rows" id="sample-rows-${i}" style="display:none;padding:6px 0 10px 12px;"></div>
+        `).join("");
         datasetsListEl.innerHTML = `
-          <div><strong>Datasets</strong> — ${data.total_items} total (page ${data.page}/${data.total_pages})</div>
-          <div style="margin-top:6px;">${rows}</div>
+          <div><strong>Datasets with sample rows</strong> — ${data.total} total (showing ${items.length})</div>
+          <div style="margin-top:6px;">${rowsHtml}</div>
         `;
+        items.forEach((d, i) => {
+          const header = datasetsListEl.querySelectorAll(".sample-dataset-row")[i];
+          const target = document.getElementById(`sample-rows-${i}`);
+          header.addEventListener("click", async () => {
+            if (target.style.display === "block") {
+              target.style.display = "none";
+              return;
+            }
+            target.style.display = "block";
+            target.innerHTML = "Loading rows…";
+            try {
+              const rowsResp = await fetch(`${apiBase}/sample_rows?dataset_id=${encodeURIComponent(d.dataset_id)}&limit=20`);
+              if (!rowsResp.ok) throw new Error(`HTTP ${rowsResp.status}`);
+              const rowsData = await rowsResp.json();
+              target.innerHTML = (rowsData.rows || []).map(r => `
+                <div class="schema" style="margin-bottom:6px;">
+                  <div style="color:#7dd3fc;font-size:12px;margin-bottom:4px;">config=${r.config || "default"} split=${r.split} row=${r.row_index}</div>
+                  <pre style="margin:0;white-space:pre-wrap;word-break:break-word;">${JSON.stringify(r.row, null, 2)}</pre>
+                </div>
+              `).join("") || "<div>No rows returned.</div>";
+            } catch (err) {
+              target.innerHTML = `<span style="color:#ef4444;">Failed to load rows:</span> ${err}`;
+            }
+          });
+        });
       } catch (err) {
         datasetsListEl.innerHTML = `<span style="color:#ef4444;">Failed to load datasets:</span> ${err}`;
       }
@@ -614,6 +704,15 @@
       card.appendChild(facets);
       card.appendChild(whyRow);
       card.appendChild(desc);
+
+      if (hit.has_sample_rows) {
+        const rowsLink = document.createElement("a");
+        rowsLink.href = `dataset.html?id=${encodeURIComponent(hit.id)}`;
+        rowsLink.textContent = "View sample rows →";
+        rowsLink.style.cssText = "color:#4fb8a3;font-size:13px;font-weight:600;text-decoration:none;";
+        card.appendChild(rowsLink);
+      }
+
       card.appendChild(btn);
       card.appendChild(schemaBox);
       toggle.addEventListener("click", () => {
@@ -667,6 +766,259 @@
       }
       if (badge) { badge.className = "badge state-error"; badge.textContent = "timeout"; }
       if (btn) btn.disabled = false;
+    }
+
+    // ------------------------------------------------------------------
+    // Search-quality benchmark harness ("Search Metrics" button).
+    // Run on demand, not on every search: replay a fixed set of benchmark
+    // queries through the app's search, judge results once, and track
+    // Precision/Recall/F1/MRR/AP/nDCG across runs over time. Ported from
+    // hf-queries.py so it doesn't need recoding when search changes later.
+    // ------------------------------------------------------------------
+    let evalSelectedRunId = null;
+
+    function renderEvalPanel() {
+      evalPanelEl.innerHTML = `
+        <div><strong>Search quality benchmark</strong></div>
+        <div class="desc" style="margin:4px 0 8px;">
+          Run the benchmark query set through a search engine, judge results once (judgments
+          persist across runs), and compare runs over time. Export to .xlsx only when you need a document.
+        </div>
+
+        <div class="eval-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px;">
+          <input id="eval-q-id" placeholder="query id (e.g. Q4)" style="width:110px;">
+          <input id="eval-q-label" placeholder="label" style="width:160px;">
+          <input id="eval-q-text" placeholder="query text" style="width:220px;">
+          <input id="eval-q-total" type="number" min="1" value="1" placeholder="expected relevant" style="width:130px;">
+          <button id="eval-q-save">Add / update query</button>
+        </div>
+        <div id="eval-queries-list"></div>
+
+        <div class="eval-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:12px 0 6px;">
+          <select id="eval-engine"></select>
+          <input id="eval-run-label" placeholder="run label" value="baseline" style="width:160px;">
+          <input id="eval-run-k" type="number" min="1" max="50" value="10" style="width:70px;">
+          <button id="eval-run-btn" style="background:#059669;color:#e2e8f0;">Run benchmark</button>
+          <span id="eval-run-status" class="desc"></span>
+        </div>
+
+        <div><strong>Run history</strong></div>
+        <div id="eval-runs-table"></div>
+        <div id="eval-run-detail" style="margin-top:10px;"></div>
+      `;
+
+      document.getElementById("eval-q-save").addEventListener("click", saveEvalQuery);
+      document.getElementById("eval-run-btn").addEventListener("click", runEvalBenchmark);
+
+      loadEvalEngines();
+      loadEvalQueries();
+      loadEvalRuns();
+    }
+
+    async function loadEvalEngines() {
+      const sel = document.getElementById("eval-engine");
+      try {
+        const resp = await fetch(`${apiBase}/eval/engines`);
+        const data = await resp.json();
+        sel.innerHTML = data.engines.map((e) => `<option value="${e}">${e}</option>`).join("");
+      } catch (err) {
+        sel.innerHTML = `<option value="bm25">bm25</option>`;
+      }
+    }
+
+    async function loadEvalQueries() {
+      const el = document.getElementById("eval-queries-list");
+      el.innerHTML = "Loading benchmark queries…";
+      try {
+        const resp = await fetch(`${apiBase}/eval/queries`);
+        const queries = await resp.json();
+        if (!queries.length) {
+          el.innerHTML = `<div class="desc">No benchmark queries yet — add one above.</div>`;
+          return;
+        }
+        el.innerHTML = `
+          <table class="eval-table">
+            <thead><tr><th>ID</th><th>Label</th><th>Query</th><th>Expected relevant</th><th>Active</th><th></th></tr></thead>
+            <tbody>
+              ${queries.map((q) => `
+                <tr>
+                  <td>${q.id}</td>
+                  <td>${q.label || ""}</td>
+                  <td>${q.query}</td>
+                  <td>${q.total_relevant}</td>
+                  <td>${q.active ? "yes" : "no"}</td>
+                  <td>${q.active ? `<button data-deactivate="${q.id}" style="background:#334155;color:#e2e8f0;padding:4px 8px;">Deactivate</button>` : ""}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `;
+        el.querySelectorAll("[data-deactivate]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            await fetch(`${apiBase}/eval/queries/${encodeURIComponent(btn.dataset.deactivate)}`, { method: "DELETE" });
+            loadEvalQueries();
+          });
+        });
+      } catch (err) {
+        el.innerHTML = `<span style="color:#ef4444;">Failed to load queries: ${err}</span>`;
+      }
+    }
+
+    async function saveEvalQuery() {
+      const id = document.getElementById("eval-q-id").value.trim();
+      const query = document.getElementById("eval-q-text").value.trim();
+      if (!id || !query) {
+        alert("Query id and query text are required.");
+        return;
+      }
+      const payload = {
+        id,
+        label: document.getElementById("eval-q-label").value.trim(),
+        query,
+        total_relevant: parseInt(document.getElementById("eval-q-total").value, 10) || 1,
+      };
+      await fetch(`${apiBase}/eval/queries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      document.getElementById("eval-q-id").value = "";
+      document.getElementById("eval-q-label").value = "";
+      document.getElementById("eval-q-text").value = "";
+      document.getElementById("eval-q-total").value = "1";
+      loadEvalQueries();
+    }
+
+    async function runEvalBenchmark() {
+      const statusEl2 = document.getElementById("eval-run-status");
+      const engine = document.getElementById("eval-engine").value;
+      const label = document.getElementById("eval-run-label").value.trim() || "run";
+      const k = parseInt(document.getElementById("eval-run-k").value, 10) || 10;
+      statusEl2.textContent = "Running…";
+      try {
+        const resp = await fetch(`${apiBase}/eval/run`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label, engine, k }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          statusEl2.textContent = `Run failed: ${err.detail || resp.statusText}`;
+          return;
+        }
+        const detail = await resp.json();
+        statusEl2.textContent = `Run complete (MAP ${detail.run.map.toFixed(3)}).`;
+        evalSelectedRunId = detail.run.id;
+        await loadEvalRuns();
+        renderEvalRunDetail(detail);
+      } catch (err) {
+        statusEl2.textContent = `Run failed: ${err}`;
+      }
+    }
+
+    async function loadEvalRuns() {
+      const el = document.getElementById("eval-runs-table");
+      try {
+        const resp = await fetch(`${apiBase}/eval/runs`);
+        const data = await resp.json();
+        if (!data.runs.length) {
+          el.innerHTML = `<div class="desc">No runs yet — click "Run benchmark" above.</div>`;
+          return;
+        }
+        el.innerHTML = `
+          <table class="eval-table">
+            <thead>
+              <tr><th>Label</th><th>Engine</th><th>k</th><th>When</th><th>MAP</th><th>Mean nDCG</th><th>Mean MRR</th><th></th></tr>
+            </thead>
+            <tbody>
+              ${data.runs.map((r) => `
+                <tr class="run-row ${r.id === evalSelectedRunId ? "selected" : ""}" data-run="${r.id}">
+                  <td>${r.label}</td>
+                  <td>${r.engine}</td>
+                  <td>${r.k}</td>
+                  <td>${new Date(r.created_at).toLocaleString()}</td>
+                  <td>${r.map.toFixed(3)}</td>
+                  <td>${r.mean_ndcg.toFixed(3)}</td>
+                  <td>${r.mean_mrr.toFixed(3)}</td>
+                  <td><a href="${apiBase}/eval/runs/${r.id}/export" style="color:#22d3ee;">Export .xlsx</a></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `;
+        el.querySelectorAll("tr[data-run]").forEach((row) => {
+          row.addEventListener("click", (ev) => {
+            if (ev.target.tagName === "A") return; // let export links through
+            selectEvalRun(row.dataset.run);
+          });
+        });
+      } catch (err) {
+        el.innerHTML = `<span style="color:#ef4444;">Failed to load run history: ${err}</span>`;
+      }
+    }
+
+    async function selectEvalRun(runId) {
+      evalSelectedRunId = runId;
+      document.querySelectorAll("#eval-runs-table tr[data-run]").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.run === runId);
+      });
+      const resp = await fetch(`${apiBase}/eval/runs/${runId}`);
+      if (!resp.ok) return;
+      renderEvalRunDetail(await resp.json());
+    }
+
+    function renderEvalRunDetail(detail) {
+      const el = document.getElementById("eval-run-detail");
+      const run = detail.run;
+      el.innerHTML = `
+        <div><strong>${run.label}</strong> — engine ${run.engine}, k=${run.k}, ${new Date(run.created_at).toLocaleString()}</div>
+        ${detail.queries.map((q) => `
+          <div style="margin-top:10px;">
+            <div><strong>${q.query_id}</strong> — ${q.label || ""} <span class="desc">(“${q.query}”, expects ${q.total_relevant} relevant)</span></div>
+            <div class="desc">
+              P@${run.k} ${q.metrics.precision.toFixed(3)} ·
+              R@${run.k} ${q.metrics.recall.toFixed(3)} ·
+              F1 ${q.metrics.f1.toFixed(3)} ·
+              MRR ${q.metrics.mrr.toFixed(3)} ·
+              AP ${q.metrics.ap.toFixed(3)} ·
+              nDCG ${q.metrics.ndcg.toFixed(3)}
+            </div>
+            <table class="eval-table">
+              <thead><tr><th>Rank</th><th>Dataset</th><th>Title</th><th>Relevant?</th></tr></thead>
+              <tbody>
+                ${q.results.map((r) => `
+                  <tr>
+                    <td>${r.rank}</td>
+                    <td><a href="dataset.html?id=${encodeURIComponent(r.dataset_id)}" style="color:#22d3ee;">${r.dataset_id}</a></td>
+                    <td>${r.title || ""}</td>
+                    <td>
+                      <button class="pill-btn ${r.relevant === true ? "pill-yes" : "pill-unset"}"
+                        data-judge="yes" data-query="${q.query_id}" data-dataset="${r.dataset_id.replace(/"/g, "&quot;")}">Yes</button>
+                      <button class="pill-btn ${r.relevant === false ? "pill-no" : "pill-unset"}"
+                        data-judge="no" data-query="${q.query_id}" data-dataset="${r.dataset_id.replace(/"/g, "&quot;")}">No</button>
+                    </td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        `).join("")}
+      `;
+      el.querySelectorAll("[data-judge]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          await fetch(`${apiBase}/eval/judge`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query_id: btn.dataset.query,
+              dataset_id: btn.dataset.dataset,
+              relevant: btn.dataset.judge === "yes",
+            }),
+          });
+          await selectEvalRun(run.id);
+          loadEvalRuns();
+        });
+      });
     }
 
     renderOpsPanel();

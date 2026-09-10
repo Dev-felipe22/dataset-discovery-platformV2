@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -36,6 +37,7 @@ class SearchHit(BaseModel):
     tags: List[str] = Field(default_factory=list)
     downloads: Optional[int] = None
     likes: Optional[int] = None
+    has_sample_rows: bool = False
 
 
 class SearchResponse(BaseModel):
@@ -120,3 +122,111 @@ class AdminPrefetchRequest(BaseModel):
 
 class AdminPrefetchResponse(AdminOpResponse):
     enqueued: int = 0
+
+
+class SampleDatasetItem(BaseModel):
+    dataset_id: str
+    row_count: int
+
+
+class SampleDatasetsResponse(BaseModel):
+    items: List[SampleDatasetItem]
+    total: int
+
+
+class SampleRowItem(BaseModel):
+    config: Optional[str] = None
+    split: Optional[str] = None
+    row_index: Optional[int] = None
+    row: dict
+
+
+class SampleRowsResponse(BaseModel):
+    dataset_id: str
+    rows: List[SampleRowItem]
+    total: int
+
+
+class DatasetMetadataResponse(BaseModel):
+    id: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    license_class: Optional[str] = None
+    access_class: Optional[str] = None
+    size_class: Optional[str] = None
+    modalities: List[str] = Field(default_factory=list)
+    languages: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+
+
+# ----------------------------------------------------------------------------
+# Search-quality evaluation (benchmark harness)
+# ----------------------------------------------------------------------------
+
+class EvalQueryIn(BaseModel):
+    id: str
+    label: str = ""
+    query: str
+    target_id: Optional[str] = None
+    total_relevant: int = Field(default=1, ge=1)
+
+
+class EvalQueryOut(EvalQueryIn):
+    active: bool = True
+    created_at: Optional[datetime] = None
+
+
+class EvalEnginesResponse(BaseModel):
+    engines: List[str]
+
+
+class EvalRunRequest(BaseModel):
+    label: str = Field(default="run")
+    engine: str = Field(default="bm25")
+    k: int = Field(default=10, ge=1, le=50)
+
+
+class EvalRunSummary(BaseModel):
+    id: str
+    label: str
+    engine: str
+    k: int
+    created_at: datetime
+    map: float = 0.0
+    mean_mrr: float = 0.0
+    mean_ndcg: float = 0.0
+    mean_precision: float = 0.0
+    mean_recall: float = 0.0
+    mean_f1: float = 0.0
+
+
+class EvalRunListResponse(BaseModel):
+    runs: List[EvalRunSummary]
+
+
+class EvalResultItem(BaseModel):
+    rank: int
+    dataset_id: str
+    title: Optional[str] = None
+    extra: Dict[str, Any] = Field(default_factory=dict)
+    relevant: Optional[bool] = None
+
+
+class EvalQueryResult(BaseModel):
+    query_id: str
+    label: str
+    query: str
+    total_relevant: int
+    results: List[EvalResultItem]
+    metrics: Dict[str, float]
+
+
+class EvalRunDetailResponse(BaseModel):
+    run: EvalRunSummary
+    queries: List[EvalQueryResult]
+
+
+class EvalJudgeRequest(BaseModel):
+    query_id: str
+    dataset_id: str
+    relevant: bool

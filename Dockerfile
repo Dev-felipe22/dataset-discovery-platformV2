@@ -23,3 +23,4 @@ ENV DUCKDB_PATH=/data/demo_discovery.duckdb
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python", "-m", "scripts.run_api", "--host", "0.0.0.0", "--port", "8000"]

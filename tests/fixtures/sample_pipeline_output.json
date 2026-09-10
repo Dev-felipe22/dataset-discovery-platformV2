@@ -1,0 +1,80 @@
+{
+  "datasets": [
+    {
+      "id": "rajpurkar/squad",
+      "source": "hf",
+      "ns_local_id": "squad",
+      "title": "SQuAD",
+      "description": "Stanford Question Answering Dataset (SQuAD) is a reading comprehension dataset consisting of questions posed by crowdworkers on Wikipedia articles.",
+      "readme_text": "# SQuAD\nStanford Question Answering Dataset. Questions and answers derived from Wikipedia articles. Widely used for reading comprehension benchmarks.",
+      "tags": ["task:question-answering", "language:en", "license:cc-by-4.0", "size_categories:10K<n<100K"],
+      "modalities": ["text"],
+      "license_class": "cc-by-4.0",
+      "access_class": "public",
+      "size_class": "10K<n<100K",
+      "languages": ["en"],
+      "quality_signals": {
+        "downloads": 852341,
+        "likes": 312,
+        "gated": false
+      }
+    },
+    {
+      "id": "ylecun/mnist",
+      "source": "hf",
+      "ns_local_id": "mnist",
+      "title": "MNIST",
+      "description": "The MNIST database of handwritten digits. Has a training set of 60,000 examples and a test set of 10,000 examples.",
+      "readme_text": "# MNIST\nHandwritten digit image dataset. 28x28 grayscale images labeled 0-9. A classic benchmark for image classification.",
+      "tags": ["task:image-classification", "license:mit", "size_categories:10K<n<100K"],
+      "modalities": ["image"],
+      "license_class": "mit",
+      "access_class": "public",
+      "size_class": "10K<n<100K",
+      "languages": [],
+      "quality_signals": {
+        "downloads": 1200000,
+        "likes": 890,
+        "gated": false
+      }
+    },
+    {
+      "id": "mozilla-foundation/common_voice_11_0",
+      "source": "hf",
+      "ns_local_id": "common_voice_11_0",
+      "title": "Common Voice 11.0",
+      "description": "Mozilla Common Voice is an open source, multi-language dataset of voices that anyone can use to train speech-enabled applications.",
+      "readme_text": "# Common Voice 11.0\nCrowdsourced multilingual speech dataset from Mozilla. Covers 100+ languages. Audio clips with transcriptions.",
+      "tags": ["task:automatic-speech-recognition", "license:cc0-1.0", "size_categories:100K<n<1M", "language:en", "language:fr", "language:de"],
+      "modalities": ["audio", "text"],
+      "license_class": "cc0-1.0",
+      "access_class": "public",
+      "size_class": "100K<n<1M",
+      "languages": ["en", "fr", "de"],
+      "quality_signals": {
+        "downloads": 430000,
+        "likes": 560,
+        "gated": false
+      }
+    },
+    {
+      "id": "scikit-learn/iris",
+      "source": "hf",
+      "ns_local_id": "iris",
+      "title": "Iris",
+      "description": "Classic tabular dataset of iris flower measurements for species classification.",
+      "readme_text": "# Iris Dataset\n150 samples of iris flowers. Features: sepal length, sepal width, petal length, petal width. Target: species (setosa, versicolor, virginica).",
+      "tags": ["task:tabular-classification", "license:mit", "size_categories:n<1K"],
+      "modalities": ["tabular"],
+      "license_class": "mit",
+      "access_class": "public",
+      "size_class": "n<1K",
+      "languages": [],
+      "quality_signals": {
+        "downloads": 43200,
+        "likes": 88,
+        "gated": false
+      }
+    }
+  ]
+}

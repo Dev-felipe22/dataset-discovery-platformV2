@@ -36,6 +36,8 @@ class Settings:
         "odc-odbl",
     )
     max_size_class: Optional[str] = None  # optional ceiling like "10M<n<100M"
+    es_url: str = "http://localhost:9200"
+    es_rows_index: str = "hf_dataset_rows"
 
     def duckdb_uri(self) -> str:
         return self.duckdb_path
@@ -82,4 +84,6 @@ def load_settings() -> Settings:
             ).split(",")
         ),
         max_size_class=os.getenv("MAX_SIZE_CLASS"),
+        es_url=os.getenv("ES_URL", "http://localhost:9200"),
+        es_rows_index=os.getenv("ES_ROWS_INDEX", "hf_dataset_rows"),
     )
