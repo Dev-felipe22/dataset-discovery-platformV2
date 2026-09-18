@@ -164,3 +164,27 @@ class StorageAdapter(abc.ABC):
         self, query_id: str, dataset_id: str, relevant: bool, judged_by: Optional[str] = None
     ) -> None:
         ...
+
+    # Dense embedding search (semantic search alongside BM25)
+    @abc.abstractmethod
+    def list_dataset_embedding_inputs(self) -> List[Dict[str, Any]]:
+        """Every dataset's id plus the text to embed for it."""
+
+    @abc.abstractmethod
+    def upsert_dataset_embeddings(self, rows: List[Dict[str, Any]], *, model: str) -> None:
+        """rows: [{'dataset_id': ..., 'embedding': [float, ...]}, ...]."""
+
+    @abc.abstractmethod
+    def search_embedding(
+        self,
+        query_embedding: List[float],
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Rank stored embeddings against an already-computed query vector."""
+
+    @abc.abstractmethod
+    def embedding_index_status(self) -> Dict[str, Any]:
+        ...

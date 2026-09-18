@@ -38,6 +38,7 @@ class SearchHit(BaseModel):
     downloads: Optional[int] = None
     likes: Optional[int] = None
     has_sample_rows: bool = False
+    score: Optional[float] = None
 
 
 class SearchResponse(BaseModel):
@@ -122,6 +123,16 @@ class AdminPrefetchRequest(BaseModel):
 
 class AdminPrefetchResponse(AdminOpResponse):
     enqueued: int = 0
+
+
+class AdminEmbeddingRebuildResponse(AdminOpResponse):
+    embedded: int = 0
+
+
+class EmbeddingStatusResponse(BaseModel):
+    model: Optional[str] = None
+    embedded_count: int = 0
+    total_datasets: int = 0
 
 
 class SampleDatasetItem(BaseModel):

@@ -33,7 +33,7 @@ An optional Hugging Face-backed sync path still exists in code, but it is not th
 1. `tests/fixtures/demo_catalog.json` seeds a local DuckDB file.
 2. `src/storage/duckdb_backend.py` stores datasets, artifacts, jobs, and search state.
 3. `src/api/main.py` starts the FastAPI app, CORS layer, and background worker.
-4. `src/api/routes.py` exposes `/v2/healthz`, `/v2/search_index`, `/v2/get_artifact`, `/v2/request_resolve`, `/v2/admin`, and the `/v2/eval/*` search-quality benchmark harness.
+4. `src/api/routes.py` exposes `/v2/healthz`, `/v2/search_index` (BM25), `/v2/search_embedding` (dense/semantic search via all-MiniLM-L6-v2), `/v2/get_artifact`, `/v2/request_resolve`, `/v2/admin`, and the `/v2/eval/*` search-quality benchmark harness.
 5. `src/ui/index.html` calls the API and renders the seeded discovery experience in the browser.
 
 The source tree now uses `src/`, while the HTTP API remains versioned under `/v2/*` to preserve the current demo contract.
@@ -113,6 +113,7 @@ Current smoke coverage:
 - `GET /v2/get_artifact`
 - cached `POST /v2/request_resolve`
 - `/v2/eval/*` search-quality benchmark run, judge, and export round trip
+- `POST /v2/search_embedding` and `POST /v2/admin/rebuild_embeddings` (dense search, requires `sentence-transformers`)
 
 CI runs the same repo-root flow in GitHub Actions:
 

@@ -15,9 +15,37 @@ from src.storage import Job, StorageAdapter
 from src.storage.duckdb_backend import DuckDBStorage
 from src.tools.prefetch import should_pause
 from src.tools.discovery_hf import discover
-from src.tools import eval_report, eval_service
+from src.tools import embeddings, eval_report, eval_service
 
 router = APIRouter(prefix="/v2")
+
+
+def _build_hits(hits_raw: list, ids_with_rows: set) -> list:
+    """Shared SearchHit mapping for both the BM25 and dense-embedding search
+    routes, so they return the exact same shape and the UI can render either
+    with the same code."""
+    return [
+        schemas.SearchHit(
+            id=h["id"],
+            title=h.get("title"),
+            description=h.get("description"),
+            readme_text=h.get("readme_text"),
+            why=h.get("why", []),
+            has_schema=h.get("has_schema", False),
+            blocked_reason=None,
+            license_class=h.get("license_class"),
+            access_class=h.get("access_class"),
+            size_class=h.get("size_class"),
+            modalities=h.get("modalities", []),
+            languages=h.get("languages", []),
+            tags=h.get("tags", []),
+            downloads=h.get("downloads"),
+            likes=h.get("likes"),
+            has_sample_rows=h["id"] in ids_with_rows,
+            score=h.get("score"),
+        )
+        for h in hits_raw
+    ]
 
 
 @router.get("/healthz")
@@ -43,28 +71,36 @@ def search_index(
     if hits_raw:
         ids_with_rows = es.dataset_ids_with_rows([h["id"] for h in hits_raw])
 
-    hits = [
-        schemas.SearchHit(
-            id=h["id"],
-            title=h.get("title"),
-            description=h.get("description"),
-            readme_text=h.get("readme_text"),
-            why=h.get("why", []),
-            has_schema=h.get("has_schema", False),
-            blocked_reason=None,
-            license_class=h.get("license_class"),
-            access_class=h.get("access_class"),
-            size_class=h.get("size_class"),
-            modalities=h.get("modalities", []),
-            languages=h.get("languages", []),
-            tags=h.get("tags", []),
-            downloads=h.get("downloads"),
-            likes=h.get("likes"),
-            has_sample_rows=h["id"] in ids_with_rows,
-        )
-        for h in hits_raw
-    ]
-    return schemas.SearchResponse(hits=hits, total=total)
+    return schemas.SearchResponse(hits=_build_hits(hits_raw, ids_with_rows), total=total)
+
+
+@router.post("/search_embedding", response_model=schemas.SearchResponse)
+def search_embedding(
+    request: schemas.SearchRequest,
+    storage: StorageAdapter = Depends(get_storage),
+    es: EsRowsClient = Depends(get_es_rows_client),
+) -> schemas.SearchResponse:
+    """Semantic search over the same catalog using all-MiniLM-L6-v2 cosine
+    similarity, alongside (not instead of) /search_index's BM25 path — run
+    'Rebuild embeddings' in Operations first, or this returns no results."""
+    filters = request.filters.dict() if request.filters else {}
+    query_embedding = embeddings.embed_query(request.query)
+    hits_raw, total = storage.search_embedding(
+        query_embedding, filters=filters, limit=request.limit, offset=request.offset
+    )
+
+    ids_with_rows: set = set()
+    if hits_raw:
+        ids_with_rows = es.dataset_ids_with_rows([h["id"] for h in hits_raw])
+
+    return schemas.SearchResponse(hits=_build_hits(hits_raw, ids_with_rows), total=total)
+
+
+@router.get("/embedding_status", response_model=schemas.EmbeddingStatusResponse)
+def embedding_status(
+    storage: StorageAdapter = Depends(get_storage),
+) -> schemas.EmbeddingStatusResponse:
+    return schemas.EmbeddingStatusResponse(**storage.embedding_index_status())
 
 
 @router.get("/dataset", response_model=schemas.DatasetMetadataResponse)
@@ -272,6 +308,32 @@ def admin_rebuild_index(
     return schemas.AdminOpResponse(
         status="ok",
         detail="Search index rebuilt (state view + FTS/LIKE structures).",
+    )
+
+
+@router.post("/admin/rebuild_embeddings", response_model=schemas.AdminEmbeddingRebuildResponse)
+def admin_rebuild_embeddings(
+    storage: StorageAdapter = Depends(get_storage),
+) -> schemas.AdminEmbeddingRebuildResponse:
+    """Batch-embeds every dataset with all-MiniLM-L6-v2 and stores the
+    vectors. Deliberately on-demand (like rebuild_index) rather than
+    per-request — encoding the whole catalog is comparatively slow and only
+    needs redoing when dataset content changes meaningfully."""
+    inputs = storage.list_dataset_embedding_inputs()
+    if not inputs:
+        return schemas.AdminEmbeddingRebuildResponse(
+            status="ok", detail="No datasets to embed.", embedded=0
+        )
+    vectors = embeddings.embed_texts([i["text"] for i in inputs])
+    rows = [
+        {"dataset_id": i["id"], "embedding": v}
+        for i, v in zip(inputs, vectors)
+    ]
+    storage.upsert_dataset_embeddings(rows, model=embeddings.EMBEDDING_MODEL_NAME)
+    return schemas.AdminEmbeddingRebuildResponse(
+        status="ok",
+        detail=f"Embedded {len(rows)} datasets with {embeddings.EMBEDDING_MODEL_NAME}.",
+        embedded=len(rows),
     )
 
 

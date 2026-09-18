@@ -131,3 +131,22 @@ class PostgresStorage(StorageAdapter):
         self, query_id: str, dataset_id: str, relevant: bool, judged_by: Optional[str] = None
     ) -> None:
         raise NotImplementedError
+
+    def list_dataset_embedding_inputs(self) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def upsert_dataset_embeddings(self, rows: List[Dict[str, Any]], *, model: str) -> None:
+        raise NotImplementedError
+
+    def search_embedding(
+        self,
+        query_embedding: List[float],
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 30,
+        offset: int = 0,
+    ):
+        raise NotImplementedError
+
+    def embedding_index_status(self) -> Dict[str, Any]:
+        raise NotImplementedError

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
+import numpy as np
 
 from .base import StorageAdapter
 from .models import Artifact, Dataset, DatasetID, Job
@@ -189,7 +190,27 @@ class DuckDBStorage(StorageAdapter):
             """
         )
         self._init_eval_tables()
+        self._init_embedding_tables()
         self._ensure_fts_loaded()
+
+    def _init_embedding_tables(self) -> None:
+        """Dense-vector store for semantic search, kept separate from
+        dataset_search (the BM25/LIKE index) so either can be rebuilt
+        independently. Embeddings are stored as JSON text, same convention
+        as every other structured column in this backend (tags, modalities,
+        quality_signals) — simplest thing that works at this corpus size,
+        and avoids depending on a DuckDB vector extension that may not be
+        installable everywhere (the FTS extension already isn't, here)."""
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_embeddings(
+                dataset_id TEXT PRIMARY KEY,
+                model TEXT,
+                embedding TEXT,
+                updated_at TIMESTAMP
+            )
+            """
+        )
 
     def _init_eval_tables(self) -> None:
         """Search-quality benchmark harness tables: a reusable query set,
@@ -1118,3 +1139,153 @@ class DuckDBStorage(StorageAdapter):
             """,
             [query_id, dataset_id, relevant, judged_by, datetime.utcnow()],
         )
+
+    # Dense embedding search --------------------------------------------------
+
+    def list_dataset_embedding_inputs(self) -> List[Dict[str, Any]]:
+        # Built directly from `datasets`, independent of the dataset_search
+        # (BM25) table, so this never depends on rebuild_search_index having
+        # run first.
+        rows = self.conn.execute(
+            """
+            SELECT id,
+                   concat_ws(
+                       ' ',
+                       coalesce(title, ''),
+                       coalesce(description, ''),
+                       coalesce(readme_text, ''),
+                       coalesce(tags, ''),
+                       coalesce(modalities, ''),
+                       coalesce(languages, '')
+                   ) AS text
+            FROM datasets
+            """
+        ).fetchall()
+        return [{"id": r[0], "text": r[1]} for r in rows]
+
+    def upsert_dataset_embeddings(self, rows: List[Dict[str, Any]], *, model: str) -> None:
+        now = datetime.utcnow()
+        for row in rows:
+            self.conn.execute(
+                """
+                INSERT INTO dataset_embeddings (dataset_id, model, embedding, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(dataset_id) DO UPDATE SET
+                    model=excluded.model,
+                    embedding=excluded.embedding,
+                    updated_at=excluded.updated_at
+                """,
+                [row["dataset_id"], model, self._json_dump(row["embedding"]), now],
+            )
+
+    def search_embedding(
+        self,
+        query_embedding: List[float],
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        filter_conditions = ""
+        filter_params: List[Any] = []
+        if filters:
+            if filters.get("modality"):
+                filter_conditions += " AND d.modalities LIKE '%' || ? || '%'"
+                filter_params.append(filters["modality"].lower())
+            if filters.get("license_class"):
+                filter_conditions += " AND d.license_class = ?"
+                filter_params.append(filters["license_class"])
+            if filters.get("size_class"):
+                filter_conditions += " AND d.size_class = ?"
+                filter_params.append(filters["size_class"])
+            if filters.get("language"):
+                filter_conditions += " AND d.languages LIKE '%' || ? || '%'"
+                filter_params.append(filters["language"].lower())
+
+        rows = self.conn.execute(
+            f"""
+            WITH schema_state AS (
+                SELECT DISTINCT dataset_id
+                FROM artifacts
+                WHERE kind='schema' AND stale = FALSE
+            )
+            SELECT
+                d.id,
+                d.title,
+                d.description,
+                d.readme_text,
+                d.tags,
+                d.modalities,
+                d.license_class,
+                d.size_class,
+                d.languages,
+                d.access_class,
+                CASE WHEN ss.dataset_id IS NULL THEN 0 ELSE 1 END AS has_schema,
+                d.quality_signals,
+                de.embedding
+            FROM dataset_embeddings de
+            JOIN datasets d ON d.id = de.dataset_id
+            LEFT JOIN schema_state ss ON ss.dataset_id = d.id
+            WHERE 1=1 {filter_conditions}
+            """,
+            filter_params,
+        ).fetchall()
+
+        if not rows:
+            return [], 0
+
+        # Vectors are stored pre-normalized (embeddings.embed_texts uses
+        # normalize_embeddings=True), so cosine similarity is a plain dot
+        # product — no per-row renormalization needed.
+        q = np.asarray(query_embedding, dtype=np.float32)
+        matrix = np.array(
+            [self._json_load(r[-1]) or [0.0] * len(query_embedding) for r in rows],
+            dtype=np.float32,
+        )
+        scores = matrix @ q
+
+        order = np.argsort(-scores)
+        total = len(order)
+        page_idx = order[offset : offset + limit]
+
+        results: List[Dict[str, Any]] = []
+        for idx in page_idx:
+            row = rows[idx]
+            (
+                did, title, desc, readme_text, tags, modalities,
+                license_class, size_class, languages, access_class,
+                has_schema, quality_signals_json, _embedding_json,
+            ) = row
+            qs = self._json_load(quality_signals_json) or {}
+            results.append(
+                {
+                    "id": did,
+                    "title": title,
+                    "description": desc,
+                    "readme_text": readme_text,
+                    "tags": self._json_load(tags) or [],
+                    "modalities": self._json_load(modalities) or [],
+                    "license_class": license_class,
+                    "size_class": size_class,
+                    "languages": self._json_load(languages) or [],
+                    "has_schema": bool(has_schema),
+                    "score": float(scores[idx]),
+                    "why": [],
+                    "access_class": access_class,
+                    "downloads": qs.get("downloads"),
+                    "likes": qs.get("likes"),
+                }
+            )
+        return results, total
+
+    def embedding_index_status(self) -> Dict[str, Any]:
+        total_datasets = self.conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
+        embedded = self.conn.execute("SELECT COUNT(*) FROM dataset_embeddings").fetchone()[0]
+        model_row = self.conn.execute(
+            "SELECT model FROM dataset_embeddings LIMIT 1"
+        ).fetchone()
+        return {
+            "embedded_count": embedded,
+            "total_datasets": total_datasets,
+            "model": model_row[0] if model_row else None,
+        }

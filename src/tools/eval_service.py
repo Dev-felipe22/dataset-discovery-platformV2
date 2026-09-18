@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from src.storage import StorageAdapter
+from src.tools import embeddings
 from src.tools.eval_metrics import compute_metrics, mean_metric
 
 EngineFn = Callable[[StorageAdapter, str, int], List[Dict[str, Any]]]
@@ -45,6 +46,33 @@ def _run_bm25(storage: StorageAdapter, query: str, k: int) -> List[Dict[str, Any
     return out
 
 
+def _run_minilm(storage: StorageAdapter, query: str, k: int) -> List[Dict[str, Any]]:
+    """Dense/semantic search via all-MiniLM-L6-v2 cosine similarity — the
+    first non-BM25 entry in this registry, added specifically to see whether
+    it closes the gap BM25 leaves on paraphrased/structural queries."""
+    query_embedding = embeddings.embed_query(query)
+    hits, _total = storage.search_embedding(query_embedding, limit=k, offset=0)
+    out = []
+    for h in hits:
+        out.append(
+            {
+                "dataset_id": h["id"],
+                "title": h.get("title"),
+                "extra": {
+                    "description": (h.get("description") or "")[:200],
+                    "license_class": h.get("license_class"),
+                    "size_class": h.get("size_class"),
+                    "modalities": h.get("modalities") or [],
+                    "has_schema": h.get("has_schema", False),
+                    "downloads": h.get("downloads"),
+                    "likes": h.get("likes"),
+                    "score": h.get("score"),
+                },
+            }
+        )
+    return out
+
+
 # Registry of retrieval strategies that can be benchmarked against the same
 # query set and judgments. Add an entry here when a new search
 # implementation needs measuring, e.g.:
@@ -56,6 +84,7 @@ def _run_bm25(storage: StorageAdapter, query: str, k: int) -> List[Dict[str, Any
 # The run endpoint takes `engine` as a plain string key into this dict.
 ENGINES: Dict[str, EngineFn] = {
     "bm25": _run_bm25,
+    "minilm": _run_minilm,
 }
 
 

@@ -225,6 +225,13 @@
       <button id="list-datasets-btn" style="background:#7c3aed;color:#e2e8f0;">Sample Rows</button>
       <button id="toggle-eval" style="background:#059669;color:#e2e8f0;">Search Metrics</button>
     </div>
+    <div class="controls">
+      <input id="dense-query" type="text" placeholder="Semantic search (all-MiniLM-L6-v2)…" value="text classification" />
+      <button id="dense-search-btn" style="background:#f472b6;color:#1a0b14;">Dense Search</button>
+      <button id="btn-rebuild-embeddings-inline" style="background:#334155;color:#e2e8f0;">Rebuild embeddings</button>
+    </div>
+    <div id="dense-status" class="desc" style="margin-bottom:8px;"></div>
+    <div id="dense-results" class="grid" style="margin-bottom:18px;"></div>
     <div class="filters">
       <select id="filter-license"><option value="">License</option></select>
       <select id="filter-modality"><option value="">Modality</option></select>
@@ -271,6 +278,8 @@
     const adminEl = document.getElementById("admin");
     const opsEl = document.getElementById("ops");
     const pagerEl = document.getElementById("pager");
+    const denseResultsEl = document.getElementById("dense-results");
+    const denseStatusEl = document.getElementById("dense-status");
 
     let state = {
       query: document.getElementById("query").value.trim(),
@@ -298,6 +307,16 @@
       }
     });
     document.getElementById("refresh-admin").addEventListener("click", () => loadAdmin());
+
+    const denseQueryInput = document.getElementById("dense-query");
+    document.getElementById("dense-search-btn").addEventListener("click", () => searchDense());
+    denseQueryInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        searchDense();
+      }
+    });
+    document.getElementById("btn-rebuild-embeddings-inline").addEventListener("click", () => rebuildEmbeddings());
 
     const evalPanelEl = document.getElementById("eval-panel");
     let evalPanelLoaded = false;
@@ -485,7 +504,7 @@
           `Found <strong>${data.total}</strong> result(s).` +
           `<br/><span style="font-size:13px;color:#94a3b8;">${statsLine}</span>`;
         renderPager();
-        hits.forEach(renderHit);
+        hits.forEach((h) => renderHit(h, resultsEl));
         populateFilters(hits);
         if (data.total === 0) {
           resultsEl.innerHTML = "<div class='panel'>No results. Try a simpler query (e.g., a single keyword) or adjust filters.</div>";
@@ -494,6 +513,53 @@
         statusEl.innerHTML = `<span style="color:#ef4444;">Search failed:</span> ${err}`;
         resultsEl.innerHTML = "<div class='panel'>Check API availability/CORS and retry.</div>";
         pagerEl.textContent = "";
+      }
+    }
+
+    // Dense/semantic search (all-MiniLM-L6-v2), run side by side with BM25
+    // above — separate bar, separate result list, same card renderer, so the
+    // two rankings for the same query are directly comparable.
+    async function searchDense() {
+      const q = denseQueryInput.value.trim();
+      if (!q) {
+        denseStatusEl.innerHTML = "Type a query first.";
+        return;
+      }
+      denseResultsEl.innerHTML = "";
+      denseStatusEl.innerHTML = "Searching (semantic)…";
+      try {
+        const resp = await fetch(`${apiBase}/search_embedding`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: q, limit: 10, offset: 0 }),
+        });
+        const data = await resp.json();
+        const hits = data.hits || [];
+        if (data.total === 0) {
+          denseStatusEl.innerHTML =
+            "No results. If you haven't built the embeddings index yet, click " +
+            "“Rebuild embeddings” above (needed once, and again after the catalog changes).";
+          return;
+        }
+        denseStatusEl.innerHTML = `Found <strong>${data.total}</strong> result(s) by cosine similarity (all-MiniLM-L6-v2).`;
+        hits.forEach((h) => renderHit(h, denseResultsEl));
+      } catch (err) {
+        denseStatusEl.innerHTML = `<span style="color:#ef4444;">Dense search failed:</span> ${err}`;
+      }
+    }
+
+    async function rebuildEmbeddings() {
+      denseStatusEl.innerHTML = "Rebuilding embeddings index (encoding every dataset with all-MiniLM-L6-v2, may take a bit on first run)…";
+      try {
+        const resp = await fetch(`${apiBase}/admin/rebuild_embeddings`, { method: "POST" });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data.status === "error") {
+          denseStatusEl.innerHTML = `Rebuild failed: ${data.detail || resp.statusText}`;
+          return;
+        }
+        denseStatusEl.innerHTML = data.detail || "Embeddings index rebuilt.";
+      } catch (err) {
+        denseStatusEl.innerHTML = `<span style="color:#ef4444;">Rebuild failed:</span> ${err}`;
       }
     }
 
@@ -551,6 +617,7 @@
         <div><strong>Operations</strong></div>
         <div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
           <button id="btn-rebuild-index">Rebuild search index</button>
+          <button id="btn-rebuild-embeddings">Rebuild embeddings</button>
           <button id="btn-discovery-topup">Discovery (new)</button>
           <span style="font-size:13px;color:#94a3b8;">Backfill window:</span>
           <select id="backfill-window" style="padding:6px 8px;border-radius:8px;border:1px solid #1e293b;background:#020617;color:#e2e8f0;font-size:13px;">
@@ -588,6 +655,8 @@
 
       document.getElementById("btn-rebuild-index").onclick = () =>
         callAdminOp("/admin/rebuild_index", null, "Rebuild search index");
+      document.getElementById("btn-rebuild-embeddings").onclick = () =>
+        callAdminOp("/admin/rebuild_embeddings", null, "Rebuild embeddings");
       document.getElementById("btn-discovery-topup").onclick = () =>
         callAdminOp("/admin/run_discovery", { mode: "topup" }, "Discovery (new)");
       document.getElementById("btn-discovery-backfill-run").onclick = () => {
@@ -607,7 +676,8 @@
         callAdminOp("/admin/run_prefetch", { limit: 100 }, "Prefetch");
     }
 
-    function renderHit(hit) {
+    function renderHit(hit, container) {
+      const targetEl = container || resultsEl;
       const card = document.createElement("div");
       card.className = "card";
       const title = document.createElement("div");
@@ -692,6 +762,7 @@
       if (tags) info.push(`Tags: ${tags}`);
       if (hit.downloads) info.push(`Downloads: ${hit.downloads}`);
       if (hit.likes) info.push(`Likes: ${hit.likes}`);
+      if (hit.score !== undefined && hit.score !== null) info.push(`Score: ${hit.score.toFixed(3)}`);
       facets.textContent = info.join(" • ");
 
       const whyRow = document.createElement("div");
@@ -725,7 +796,7 @@
         }
       });
       card.appendChild(toggle);
-      resultsEl.appendChild(card);
+      targetEl.appendChild(card);
     }
 
     async function fetchArtifact(id) {
