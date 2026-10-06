@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +12,13 @@ import numpy as np
 
 from .base import StorageAdapter
 from .models import Artifact, Dataset, DatasetID, Job
+
+# Process-wide cache of the dense-vector matrix, keyed by database path.
+# Search used to decode every stored vector on every query; now the matrix is
+# loaded once and reused until the table's contents change. Process-wide (not
+# per-instance) because the API builds a new DuckDBStorage for every request.
+_VECTOR_CACHE: Dict[str, Dict[str, Any]] = {}
+_VECTOR_CACHE_LOCK = threading.Lock()
 
 
 class DuckDBStorage(StorageAdapter):
@@ -196,17 +205,17 @@ class DuckDBStorage(StorageAdapter):
     def _init_embedding_tables(self) -> None:
         """Dense-vector store for semantic search, kept separate from
         dataset_search (the BM25/LIKE index) so either can be rebuilt
-        independently. Embeddings are stored as JSON text, same convention
-        as every other structured column in this backend (tags, modalities,
-        quality_signals) — simplest thing that works at this corpus size,
-        and avoids depending on a DuckDB vector extension that may not be
-        installable everywhere (the FTS extension already isn't, here)."""
+        independently. Each vector is a raw float32 BLOB (384 x 4 bytes),
+        not JSON text: decoding is a memory copy instead of parsing, which is
+        what made search slow when vectors were stored as JSON. The legacy
+        dataset_embeddings (JSON) table is migrated by
+        scripts/migrate_embeddings.py and is no longer written or read here."""
         self.conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS dataset_embeddings(
+            CREATE TABLE IF NOT EXISTS dataset_vectors(
                 dataset_id TEXT PRIMARY KEY,
                 model TEXT,
-                embedding TEXT,
+                vector BLOB,
                 updated_at TIMESTAMP
             )
             """
@@ -1164,19 +1173,128 @@ class DuckDBStorage(StorageAdapter):
         return [{"id": r[0], "text": r[1]} for r in rows]
 
     def upsert_dataset_embeddings(self, rows: List[Dict[str, Any]], *, model: str) -> None:
+        if not rows:
+            return
         now = datetime.utcnow()
-        for row in rows:
+        self.upsert_vector_blobs(
+            [
+                (
+                    row["dataset_id"],
+                    model,
+                    np.asarray(row["embedding"], dtype=np.float32).tobytes(),
+                    now,
+                )
+                for row in rows
+            ]
+        )
+
+    def upsert_vector_blobs(self, rows: List[Tuple[str, str, bytes, datetime]]) -> None:
+        """Bulk write of (dataset_id, model, float32 bytes, updated_at) rows.
+
+        Deliberately not INSERT ... ON CONFLICT row by row: in DuckDB that
+        runs at roughly 100 rows/second on a keyed table, against tens of
+        thousands per second for a bulk insert. Instead: stage the rows,
+        delete any existing ids being replaced, bulk-insert the lot, all in
+        one transaction."""
+        if not rows:
+            return
+        import pyarrow as pa
+
+        staging = pa.table(
+            {
+                "dataset_id": pa.array([r[0] for r in rows], type=pa.string()),
+                "model": pa.array([r[1] for r in rows], type=pa.string()),
+                "vector": pa.array([r[2] for r in rows], type=pa.binary()),
+                "updated_at": pa.array([r[3] for r in rows], type=pa.timestamp("us")),
+            }
+        )
+        self.conn.register("vector_staging", staging)
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
             self.conn.execute(
-                """
-                INSERT INTO dataset_embeddings (dataset_id, model, embedding, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(dataset_id) DO UPDATE SET
-                    model=excluded.model,
-                    embedding=excluded.embedding,
-                    updated_at=excluded.updated_at
-                """,
-                [row["dataset_id"], model, self._json_dump(row["embedding"]), now],
+                "DELETE FROM dataset_vectors WHERE dataset_id IN (SELECT dataset_id FROM vector_staging)"
             )
+            self.conn.execute("INSERT INTO dataset_vectors SELECT * FROM vector_staging")
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+        finally:
+            self.conn.unregister("vector_staging")
+
+    def _vector_signature(self) -> tuple:
+        # Changes whenever a vector is added, replaced, or rewritten, so a
+        # cached matrix can tell it's stale. Cheap: a count and a max.
+        count, latest = self.conn.execute(
+            "SELECT COUNT(*), MAX(updated_at) FROM dataset_vectors"
+        ).fetchone()
+        return (count, str(latest))
+
+    def _load_vector_matrix(self, signature: tuple) -> Dict[str, Any]:
+        count = signature[0]
+        if count == 0:
+            return {"signature": signature, "ids": [], "matrix": None, "index": {}}
+
+        # Read through a separate cursor so this doesn't clash with any other
+        # statement on the same connection. Batched so the raw blobs never
+        # all sit in Python memory at once.
+        reader = self.conn.cursor()
+        reader.execute("SELECT dataset_id, vector FROM dataset_vectors")
+        matrix = None
+        ids: List[str] = []
+        while True:
+            batch = reader.fetchmany(20000)
+            if not batch:
+                break
+            if matrix is None:
+                dim = len(batch[0][1]) // 4
+                matrix = np.empty((count, dim), dtype=np.float32)
+            for did, blob in batch:
+                if len(ids) >= count:
+                    # Table grew after we read the count. Stop here; the next
+                    # search sees the new signature and reloads.
+                    break
+                matrix[len(ids)] = np.frombuffer(blob, dtype=np.float32)
+                ids.append(did)
+        reader.close()
+
+        if matrix is None:
+            return {"signature": signature, "ids": [], "matrix": None, "index": {}}
+        matrix = matrix[: len(ids)]
+        return {"signature": signature, "ids": ids, "matrix": matrix, "index": {}}
+
+    def _get_vector_index(self) -> Dict[str, Any]:
+        key = os.path.abspath(self.db_path)
+        signature = self._vector_signature()
+        with _VECTOR_CACHE_LOCK:
+            cached = _VECTOR_CACHE.get(key)
+        if cached is not None and cached["signature"] == signature:
+            return cached
+
+        loaded = self._load_vector_matrix(signature)
+        loaded["index"] = {d: i for i, d in enumerate(loaded["ids"])}
+        with _VECTOR_CACHE_LOCK:
+            _VECTOR_CACHE[key] = loaded
+        return loaded
+
+    @staticmethod
+    def _filter_conditions(filters: Optional[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+        conditions = ""
+        params: List[Any] = []
+        if filters:
+            if filters.get("modality"):
+                conditions += " AND d.modalities LIKE '%' || ? || '%'"
+                params.append(filters["modality"].lower())
+            if filters.get("license_class"):
+                conditions += " AND d.license_class = ?"
+                params.append(filters["license_class"])
+            if filters.get("size_class"):
+                conditions += " AND d.size_class = ?"
+                params.append(filters["size_class"])
+            if filters.get("language"):
+                conditions += " AND d.languages LIKE '%' || ? || '%'"
+                params.append(filters["language"].lower())
+        return conditions, params
 
     def search_embedding(
         self,
@@ -1186,22 +1304,49 @@ class DuckDBStorage(StorageAdapter):
         limit: int = 30,
         offset: int = 0,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        filter_conditions = ""
-        filter_params: List[Any] = []
-        if filters:
-            if filters.get("modality"):
-                filter_conditions += " AND d.modalities LIKE '%' || ? || '%'"
-                filter_params.append(filters["modality"].lower())
-            if filters.get("license_class"):
-                filter_conditions += " AND d.license_class = ?"
-                filter_params.append(filters["license_class"])
-            if filters.get("size_class"):
-                filter_conditions += " AND d.size_class = ?"
-                filter_params.append(filters["size_class"])
-            if filters.get("language"):
-                filter_conditions += " AND d.languages LIKE '%' || ? || '%'"
-                filter_params.append(filters["language"].lower())
+        index = self._get_vector_index()
+        matrix = index["matrix"]
+        if matrix is None or not index["ids"]:
+            return [], 0
 
+        # Vectors are unit-length (normalized at encode time), so cosine
+        # similarity is a plain dot product. One matrix-vector multiply covers
+        # the whole catalog.
+        q = np.asarray(query_embedding, dtype=np.float32)
+        scores = matrix @ q
+        n = scores.shape[0]
+
+        if filters and any(filters.get(k) for k in ("modality", "license_class", "size_class", "language")):
+            conditions, params = self._filter_conditions(filters)
+            eligible_rows = self.conn.execute(
+                f"SELECT d.id FROM datasets d WHERE 1=1 {conditions}", params
+            ).fetchall()
+            position = index["index"]
+            allowed = np.fromiter(
+                (position[r[0]] for r in eligible_rows if r[0] in position),
+                dtype=np.int64,
+            )
+            masked = np.full(n, -np.inf, dtype=np.float32)
+            masked[allowed] = scores[allowed]
+            scores = masked
+            total = int(allowed.shape[0])
+        else:
+            total = n
+
+        # Only the top offset+limit positions need ordering, not the whole catalog.
+        want = offset + limit
+        if want >= n:
+            order = np.argsort(-scores)
+        else:
+            top = np.argpartition(-scores, want)[:want]
+            order = top[np.argsort(-scores[top])]
+        page = [int(i) for i in order[offset : offset + limit] if np.isfinite(scores[i])]
+        if not page:
+            return [], total
+
+        # Metadata is only fetched for the hits on this page.
+        page_ids = [index["ids"][i] for i in page]
+        placeholders = ",".join(["?"] * len(page_ids))
         rows = self.conn.execute(
             f"""
             WITH schema_state AS (
@@ -1221,40 +1366,25 @@ class DuckDBStorage(StorageAdapter):
                 d.languages,
                 d.access_class,
                 CASE WHEN ss.dataset_id IS NULL THEN 0 ELSE 1 END AS has_schema,
-                d.quality_signals,
-                de.embedding
-            FROM dataset_embeddings de
-            JOIN datasets d ON d.id = de.dataset_id
+                d.quality_signals
+            FROM datasets d
             LEFT JOIN schema_state ss ON ss.dataset_id = d.id
-            WHERE 1=1 {filter_conditions}
+            WHERE d.id IN ({placeholders})
             """,
-            filter_params,
+            page_ids,
         ).fetchall()
-
-        if not rows:
-            return [], 0
-
-        # Vectors are stored pre-normalized (embeddings.embed_texts uses
-        # normalize_embeddings=True), so cosine similarity is a plain dot
-        # product — no per-row renormalization needed.
-        q = np.asarray(query_embedding, dtype=np.float32)
-        matrix = np.array(
-            [self._json_load(r[-1]) or [0.0] * len(query_embedding) for r in rows],
-            dtype=np.float32,
-        )
-        scores = matrix @ q
-
-        order = np.argsort(-scores)
-        total = len(order)
-        page_idx = order[offset : offset + limit]
+        by_id = {r[0]: r for r in rows}
 
         results: List[Dict[str, Any]] = []
-        for idx in page_idx:
-            row = rows[idx]
+        for i in page:
+            did = index["ids"][i]
+            row = by_id.get(did)
+            if row is None:
+                continue
             (
-                did, title, desc, readme_text, tags, modalities,
+                _id, title, desc, readme_text, tags, modalities,
                 license_class, size_class, languages, access_class,
-                has_schema, quality_signals_json, _embedding_json,
+                has_schema, quality_signals_json,
             ) = row
             qs = self._json_load(quality_signals_json) or {}
             results.append(
@@ -1269,7 +1399,7 @@ class DuckDBStorage(StorageAdapter):
                     "size_class": size_class,
                     "languages": self._json_load(languages) or [],
                     "has_schema": bool(has_schema),
-                    "score": float(scores[idx]),
+                    "score": float(scores[i]),
                     "why": [],
                     "access_class": access_class,
                     "downloads": qs.get("downloads"),
@@ -1280,12 +1410,14 @@ class DuckDBStorage(StorageAdapter):
 
     def embedding_index_status(self) -> Dict[str, Any]:
         total_datasets = self.conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
-        embedded = self.conn.execute("SELECT COUNT(*) FROM dataset_embeddings").fetchone()[0]
-        model_row = self.conn.execute(
-            "SELECT model FROM dataset_embeddings LIMIT 1"
-        ).fetchone()
+        embedded = self.conn.execute("SELECT COUNT(*) FROM dataset_vectors").fetchone()[0]
+        model_row = self.conn.execute("SELECT model FROM dataset_vectors LIMIT 1").fetchone()
         return {
             "embedded_count": embedded,
             "total_datasets": total_datasets,
             "model": model_row[0] if model_row else None,
         }
+
+    def get_embedded_dataset_ids(self) -> set:
+        rows = self.conn.execute("SELECT dataset_id FROM dataset_vectors").fetchall()
+        return {r[0] for r in rows}

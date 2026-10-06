@@ -150,3 +150,6 @@ class PostgresStorage(StorageAdapter):
 
     def embedding_index_status(self) -> Dict[str, Any]:
         raise NotImplementedError
+
+    def get_embedded_dataset_ids(self) -> set:
+        raise NotImplementedError

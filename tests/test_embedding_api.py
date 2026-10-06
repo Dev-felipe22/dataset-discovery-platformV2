@@ -15,7 +15,7 @@ from scripts.demo_data import build_demo_db
 FIXTURE_PATH = Path("tests/fixtures/demo_catalog.json")
 
 
-def _fake_embed_texts(texts: List[str]) -> List[List[float]]:
+def _fake_embed_texts(texts: List[str], *, batch_size: int = 64) -> List[List[float]]:
     """Deterministic stand-in for the real MiniLM model: hashes text into a
     small vector so tests don't need network access or torch installed.
     Keeps the same [text] -> [[float, ...]] contract as the real function."""
@@ -39,7 +39,7 @@ def _stub_embedding_model(monkeypatch):
     yield
 
 
-def _create_client(tmp_path: Path) -> TestClient:
+def _create_client(tmp_path: Path) -> tuple[TestClient, Path]:
     db_path = tmp_path / "embedding_api.duckdb"
     build_demo_db(db_path, FIXTURE_PATH)
     os.environ["DUCKDB_PATH"] = str(db_path)
@@ -52,11 +52,20 @@ def _create_client(tmp_path: Path) -> TestClient:
 
     from src.api.main import create_app
 
-    return TestClient(create_app())
+    return TestClient(create_app()), db_path
+
+
+def _rebuild_embeddings(db_path: Path) -> int:
+    """Embeddings are rebuilt via the CLI script, not an HTTP endpoint —
+    there is no admin route for this on purpose (see routes.py)."""
+    from scripts.rebuild_embeddings import rebuild
+
+    return rebuild(str(db_path))
 
 
 def test_embedding_status_reports_zero_before_rebuild(tmp_path: Path) -> None:
-    with _create_client(tmp_path) as client:
+    client, _db_path = _create_client(tmp_path)
+    with client:
         resp = client.get("/v2/embedding_status")
         assert resp.status_code == 200
         data = resp.json()
@@ -64,13 +73,20 @@ def test_embedding_status_reports_zero_before_rebuild(tmp_path: Path) -> None:
         assert data["total_datasets"] >= 1
 
 
-def test_rebuild_embeddings_then_search(tmp_path: Path) -> None:
-    with _create_client(tmp_path) as client:
-        rebuild = client.post("/v2/admin/rebuild_embeddings")
-        assert rebuild.status_code == 200
-        body = rebuild.json()
-        assert body["status"] == "ok"
-        assert body["embedded"] >= 1
+def test_no_admin_http_endpoint_for_rebuilding_embeddings(tmp_path: Path) -> None:
+    # Deliberately CLI-only — see the comment in routes.py. This pins that
+    # decision so it doesn't silently regress back to a public admin route.
+    client, _db_path = _create_client(tmp_path)
+    with client:
+        resp = client.post("/v2/admin/rebuild_embeddings")
+        assert resp.status_code == 404
+
+
+def test_rebuild_embeddings_script_then_search(tmp_path: Path) -> None:
+    client, db_path = _create_client(tmp_path)
+    with client:
+        embedded = _rebuild_embeddings(db_path)
+        assert embedded >= 1
 
         status = client.get("/v2/embedding_status").json()
         assert status["embedded_count"] == status["total_datasets"]
@@ -88,7 +104,8 @@ def test_rebuild_embeddings_then_search(tmp_path: Path) -> None:
 def test_search_index_now_also_reports_a_score(tmp_path: Path) -> None:
     # score was added to SearchHit so BM25 and dense results are comparable
     # side by side in the UI.
-    with _create_client(tmp_path) as client:
+    client, _db_path = _create_client(tmp_path)
+    with client:
         resp = client.post(
             "/v2/search_index",
             json={"query": "text classification", "limit": 5},
@@ -98,12 +115,13 @@ def test_search_index_now_also_reports_a_score(tmp_path: Path) -> None:
 
 
 def test_minilm_engine_is_registered_for_benchmarking(tmp_path: Path) -> None:
-    with _create_client(tmp_path) as client:
+    client, db_path = _create_client(tmp_path)
+    with client:
         engines = client.get("/v2/eval/engines").json()["engines"]
         assert "bm25" in engines
         assert "minilm" in engines
 
-        client.post("/v2/admin/rebuild_embeddings")
+        _rebuild_embeddings(db_path)
         client.post(
             "/v2/eval/queries",
             json={"id": "E1", "label": "embedding smoke", "query": "text classification", "total_relevant": 1},

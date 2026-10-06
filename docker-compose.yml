@@ -22,6 +22,36 @@ services:
       retries: 3
       start_period: 15s
 
+  # One-off maintenance jobs that want a GPU (currently just embeddings
+  # rebuild). Kept as a separate service, not a flag on `api`, so a
+  # misconfigured/missing GPU can never stop the always-on api/ui services
+  # from starting — only this profile-gated service depends on it. Declaring
+  # the GPU reservation here (rather than via `docker compose run --gpus
+  # all`) works regardless of Compose CLI version, since `--gpus` on `run`
+  # needs a newer Compose than this repo assumes.
+  #
+  # Usage:
+  #   docker compose run --rm embed python -m scripts.rebuild_embeddings \
+  #     --db-path /data/demo_discovery.duckdb --limit 2000 --batch-size 256
+  # If that errors because the profile isn't active, prefix with:
+  #   docker compose --profile tools run --rm embed ...
+  embed:
+    build: .
+    profiles: ["tools"]
+    volumes:
+      - duckdb_data:/data
+      - pipeline_data:/pipeline_data:ro
+      - v1_pipeline_data:/v1_pipeline_data:ro
+    environment:
+      DUCKDB_PATH: /data/demo_discovery.duckdb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   ui:
     image: nginx:alpine
     ports:

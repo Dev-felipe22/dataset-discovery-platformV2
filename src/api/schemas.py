@@ -125,10 +125,6 @@ class AdminPrefetchResponse(AdminOpResponse):
     enqueued: int = 0
 
 
-class AdminEmbeddingRebuildResponse(AdminOpResponse):
-    embedded: int = 0
-
-
 class EmbeddingStatusResponse(BaseModel):
     model: Optional[str] = None
     embedded_count: int = 0

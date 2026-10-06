@@ -113,7 +113,7 @@ Current smoke coverage:
 - `GET /v2/get_artifact`
 - cached `POST /v2/request_resolve`
 - `/v2/eval/*` search-quality benchmark run, judge, and export round trip
-- `POST /v2/search_embedding` and `POST /v2/admin/rebuild_embeddings` (dense search, requires `sentence-transformers`)
+- `POST /v2/search_embedding` and `GET /v2/embedding_status` (dense search, requires `sentence-transformers`; the embeddings themselves are built with `python -m scripts.rebuild_embeddings`, CLI-only, no admin HTTP route)
 
 CI runs the same repo-root flow in GitHub Actions:
 

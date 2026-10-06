@@ -311,30 +311,10 @@ def admin_rebuild_index(
     )
 
 
-@router.post("/admin/rebuild_embeddings", response_model=schemas.AdminEmbeddingRebuildResponse)
-def admin_rebuild_embeddings(
-    storage: StorageAdapter = Depends(get_storage),
-) -> schemas.AdminEmbeddingRebuildResponse:
-    """Batch-embeds every dataset with all-MiniLM-L6-v2 and stores the
-    vectors. Deliberately on-demand (like rebuild_index) rather than
-    per-request — encoding the whole catalog is comparatively slow and only
-    needs redoing when dataset content changes meaningfully."""
-    inputs = storage.list_dataset_embedding_inputs()
-    if not inputs:
-        return schemas.AdminEmbeddingRebuildResponse(
-            status="ok", detail="No datasets to embed.", embedded=0
-        )
-    vectors = embeddings.embed_texts([i["text"] for i in inputs])
-    rows = [
-        {"dataset_id": i["id"], "embedding": v}
-        for i, v in zip(inputs, vectors)
-    ]
-    storage.upsert_dataset_embeddings(rows, model=embeddings.EMBEDDING_MODEL_NAME)
-    return schemas.AdminEmbeddingRebuildResponse(
-        status="ok",
-        detail=f"Embedded {len(rows)} datasets with {embeddings.EMBEDDING_MODEL_NAME}.",
-        embedded=len(rows),
-    )
+# Deliberately no /admin/rebuild_embeddings HTTP endpoint: recomputing the
+# dense index is an operator step, not something the running app should
+# expose to end users. Run `python -m scripts.rebuild_embeddings` instead,
+# same CLI-only pattern as load_catalog.py / create_demo_db.py.
 
 
 @router.post("/admin/run_discovery", response_model=schemas.AdminDiscoveryResponse)

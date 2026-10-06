@@ -188,3 +188,8 @@ class StorageAdapter(abc.ABC):
     @abc.abstractmethod
     def embedding_index_status(self) -> Dict[str, Any]:
         ...
+
+    @abc.abstractmethod
+    def get_embedded_dataset_ids(self) -> set:
+        """Dataset ids that already have a stored embedding — lets a rebuild
+        resume after an interruption instead of redoing everything."""

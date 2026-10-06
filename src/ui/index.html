@@ -228,7 +228,6 @@
     <div class="controls">
       <input id="dense-query" type="text" placeholder="Semantic search (all-MiniLM-L6-v2)…" value="text classification" />
       <button id="dense-search-btn" style="background:#f472b6;color:#1a0b14;">Dense Search</button>
-      <button id="btn-rebuild-embeddings-inline" style="background:#334155;color:#e2e8f0;">Rebuild embeddings</button>
     </div>
     <div id="dense-status" class="desc" style="margin-bottom:8px;"></div>
     <div id="dense-results" class="grid" style="margin-bottom:18px;"></div>
@@ -316,7 +315,6 @@
         searchDense();
       }
     });
-    document.getElementById("btn-rebuild-embeddings-inline").addEventListener("click", () => rebuildEmbeddings());
 
     const evalPanelEl = document.getElementById("eval-panel");
     let evalPanelLoaded = false;
@@ -537,29 +535,14 @@
         const hits = data.hits || [];
         if (data.total === 0) {
           denseStatusEl.innerHTML =
-            "No results. If you haven't built the embeddings index yet, click " +
-            "“Rebuild embeddings” above (needed once, and again after the catalog changes).";
+            "No results. The embeddings index may not be built yet for this database — " +
+            "that's an operator step (<code>python -m scripts.rebuild_embeddings</code>), not something to trigger from here.";
           return;
         }
         denseStatusEl.innerHTML = `Found <strong>${data.total}</strong> result(s) by cosine similarity (all-MiniLM-L6-v2).`;
         hits.forEach((h) => renderHit(h, denseResultsEl));
       } catch (err) {
         denseStatusEl.innerHTML = `<span style="color:#ef4444;">Dense search failed:</span> ${err}`;
-      }
-    }
-
-    async function rebuildEmbeddings() {
-      denseStatusEl.innerHTML = "Rebuilding embeddings index (encoding every dataset with all-MiniLM-L6-v2, may take a bit on first run)…";
-      try {
-        const resp = await fetch(`${apiBase}/admin/rebuild_embeddings`, { method: "POST" });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || data.status === "error") {
-          denseStatusEl.innerHTML = `Rebuild failed: ${data.detail || resp.statusText}`;
-          return;
-        }
-        denseStatusEl.innerHTML = data.detail || "Embeddings index rebuilt.";
-      } catch (err) {
-        denseStatusEl.innerHTML = `<span style="color:#ef4444;">Rebuild failed:</span> ${err}`;
       }
     }
 
@@ -617,7 +600,6 @@
         <div><strong>Operations</strong></div>
         <div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
           <button id="btn-rebuild-index">Rebuild search index</button>
-          <button id="btn-rebuild-embeddings">Rebuild embeddings</button>
           <button id="btn-discovery-topup">Discovery (new)</button>
           <span style="font-size:13px;color:#94a3b8;">Backfill window:</span>
           <select id="backfill-window" style="padding:6px 8px;border-radius:8px;border:1px solid #1e293b;background:#020617;color:#e2e8f0;font-size:13px;">
@@ -628,7 +610,7 @@
           <button id="btn-discovery-backfill-run">Run backfill</button>
           <button id="btn-prefetch-now">Prefetch now</button>
         </div>
-        <div id="ops-status" class="desc" style="margin-top:6px;">Use these controls for small, bounded maintenance operations. Heavy ingest/backfill remains CLI-only.</div>
+        <div id="ops-status" class="desc" style="margin-top:6px;">Use these controls for small, bounded maintenance operations. Heavy ingest/backfill remains CLI-only, as does rebuilding the dense-search embeddings index (<code>python -m scripts.rebuild_embeddings</code>) — run it after the catalog changes.</div>
       `;
 
       const opsStatus = document.getElementById("ops-status");
@@ -655,8 +637,6 @@
 
       document.getElementById("btn-rebuild-index").onclick = () =>
         callAdminOp("/admin/rebuild_index", null, "Rebuild search index");
-      document.getElementById("btn-rebuild-embeddings").onclick = () =>
-        callAdminOp("/admin/rebuild_embeddings", null, "Rebuild embeddings");
       document.getElementById("btn-discovery-topup").onclick = () =>
         callAdminOp("/admin/run_discovery", { mode: "topup" }, "Discovery (new)");
       document.getElementById("btn-discovery-backfill-run").onclick = () => {
